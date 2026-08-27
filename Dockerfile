@@ -10,7 +10,8 @@ LABEL build_version="Linuxserver.io version:- ${VERSION} Build-date:- ${BUILD_DA
 LABEL maintainer="aptalca"
 
 # Add needed nvidia environment variables for container toolkit
-ENV NVIDIA_DRIVER_CAPABILITIES="compute,video,utility"
+ENV NVIDIA_DRIVER_CAPABILITIES="compute,video,utility" \
+    S6_KEEP_ENV=1
 
 # global environment settings
 ENV DEBIAN_FRONTEND="noninteractive"

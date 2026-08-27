@@ -1,45 +1,33 @@
 #!/usr/bin/with-contenv bash
 # Wrapper that lets this image run with `docker --init` (tini as PID 1).
 #
-# Two problems to solve simultaneously:
-#   1. s6-overlay-suexec refuses to run unless it sees PID 1 in its PID
-#      namespace.
-#   2. s6-envdir reports "unable to envdir /run/s6/container_environment"
-#      when the envdir doesn't exist yet (some hosts, e.g. RunPod under
-#      --init, don't pre-populate /run/s6 the way stock Docker does).
+# The baseimage is designed around s6-overlay v3, which reads container
+# env vars from /run/s6/container_environment (an envdir). Stock Docker
+# populates that dir for you; some hosts (notably RunPod under --init)
+# don't, which is why you see:
 #
-# Both are addressed by doing `unshare -pm` with a fresh mount namespace:
-#   -p  s6-suexec sees its own namespace's PID 1 (unshare makes getpid()==1)
-#   -m  gives /run a brand-new tmpfs (s6-overlay then creates /run/s6 +
-#      /run/s6/container_environment itself, no race with whatever the host
-#      had pre-mounted under /run)
+#   s6-envdir: fatal: unable to envdir /run/s6/container_environment:
+#              No such file or directory
 #
-# We mount the tmpfs over /run *before* execing /init. s6-overlay already
-# has logic to mount /run itself ("/run exists and is writable. If it is
-# not, it will attempt to mount a tmpfs there.") so the manual mount just
-# guarantees the directory layout s6-overlay expects, eliminating the
-# envdir error on hosts where the parent mount NS has nothing useful under
-# /run.
+# Two changes make this resilient on any host, regardless of how /run is
+# pre-populated:
 #
-# Outside the new namespaces, tini is still PID 1, so --init keeps its
-# signal/zombie-reaping semantics.
+#   1. unshare -fpm gives /init its own PID + mount namespaces.
+#        -p  s6-overlay-suexec insists on PID 1 in its PID NS.
+#        -m  s6-overlay then mounts its own tmpfs at /run and creates
+#            /run/s6/container_environment itself, no race with the host.
+#
+#   2. S6_KEEP_ENV=1 instructs s6-overlay to inherit the existing env
+#      directly instead of routing through with-contenv and s6-envdir.
+#      Even if /run/s6/container_environment never gets populated for
+#      any reason, every service still sees the original Docker env.
 
 set -eu
 
-# Build a small mount+pid pair, then exec /init.
-#
-# We can't mount the tmpfs directly inside `unshare -m` shell because some
-# runtimes disallow unprivileged mounts in user namespaces. So we use a
-# separate unshare just for mounting the tmpfs, then re-enter /init with
-# both -p and -m. The child tmpfs lives only in /run, so /etc and the rest
-# of the filesystem remain read-only-root-safe if the caller sets
-# S6_READ_ONLY_ROOT=1.
-
-if ! mountpoint -q /run 2>/dev/null; then
-  # /run is not a mount in the inherited mount table (typical on RunPod).
-  # Bind-mount /run onto itself so the new mount namespace gets a stable
-  # mount point to overlay.
-  mount --bind /run /run 2>/dev/null || true
-fi
+# S6_KEEP_ENV=1 makes with-contenv a no-op so services don't need the
+# /run/s6/container_environment envdir to be present. Export it before
+# unshare so the env value propagates into the new namespace via the
+# inherited environment.
+export S6_KEEP_ENV="${S6_KEEP_ENV:-1}"
 
 exec /usr/bin/unshare -fpm -- /init "$@"
