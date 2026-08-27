@@ -1,12 +1,35 @@
 #!/usr/bin/with-contenv bash
 # Wrapper that lets this image run with `docker --init` (tini as PID 1).
+#
 # s6-overlay-suexec refuses to start unless it is PID 1 in its PID namespace,
-# so we re-exec /init inside fresh PID + mount namespaces via `unshare -fpm`.
-# -p : s6-suexec needs to be PID 1.
-# -m : the baseimage's init scripts mount a tmpfs at /run/s6 and populate
-#      /run/s6/container_environment before s6 starts; without an isolated
-#      mount namespace those mounts vanish (or fight tini) and s6-envdir
-#      later reports: "fatal: unable to envdir /run/s6/container_environment".
+# so we re-exec /init inside fresh PID + mount namespaces via `unshare -fpm`:
+#   -p  s6-suexec needs to be PID 1
+#   -m  isolate /run/s6 from the host namespace (otherwise s6-envdir reads
+#       a stale or missing /run/s6/container_environment and aborts before
+#       the baseimage's own init scripts get a chance to populate it)
+#
 # Inside the new namespace s6 sees itself as PID 1; outside, tini stays
-# PID 1 so `docker --init` still gets clean signal/ zombie reaping.
+# PID 1 so `docker --init` still reaps zombies and forwards signals.
+
+# Belt-and-braces: ensure the envdir exists before s6-overlay's init opens
+# it. With `unshare -m`, the parent mount NS may carry an empty (or
+# nonexistent) /run/s6; creating the directory here lets s6-envdir open
+# it successfully even on hosts that don't pre-mount anything under /run.
+mkdir -p /run/s6/container_environment
+
+# Seed the envdir with every env var passed by Docker, minus a couple of
+# internal ones that s6-overlay already handles on its own. This mirrors
+# what `init-mods-package-install`-style boot scripts do on a stock
+# LinuxServer baseimage — and makes the wrapper robust to hosts (RunPod,
+# generic Docker, etc.) that don't pre-populate /run/s6.
+for var in $(env | cut -d= -f1); do
+    case "$var" in
+        HOSTNAME|HOME|PATH|TERM|SHLVL|PWD|_|LSIO_FIRST_PART1)
+            continue
+            ;;
+    esac
+    value=$(printf '%s' "${!var}")
+    printf '%s' "$value" > "/run/s6/container_environment/$var" 2>/dev/null || true
+done
+
 exec /usr/bin/unshare -fpm -- /init "$@"
