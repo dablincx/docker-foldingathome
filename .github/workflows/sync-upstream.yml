@@ -1,0 +1,75 @@
+name: Sync from upstream
+
+on:
+  schedule:
+    - cron: "10 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/linuxserver/docker-foldingathome.git
+
+      - name: Fetch upstream and compute diff
+        id: diff
+        run: |
+          git fetch upstream master
+          NEW_COMMITS=$(git log --oneline HEAD..upstream/master)
+          if [ -z "${NEW_COMMITS}" ]; then
+            echo "no_new_commits=true" >> $GITHUB_OUTPUT
+            echo "No new upstream commits on master; nothing to do."
+            exit 0
+          fi
+          echo "no_new_commits=false" >> $GITHUB_OUTPUT
+          echo "## New upstream commits" >> $GITHUB_STEP_SUMMARY
+          echo "${NEW_COMMITS}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Resolve FAH release version from upstream meta.json
+        id: ver
+        if: steps.diff.outputs.no_new_commits != 'true'
+        run: |
+          VERSION=$(curl -s https://download.foldingathome.org/releases/public/fah-client/meta.json \
+            | jq -r '.[] | select((.package | contains("amd64.deb")) and (.package | contains("release"))) | .package' \
+            | awk -F'(fah-client_|_amd64.deb)' '{print $2}' \
+            | sort -rV | head -1)
+          echo "Resolved FAH version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Merge upstream into master
+        if: steps.diff.outputs.no_new_commits != 'true'
+        run: |
+          set -e
+          git pull --no-edit --strategy-option=theirs upstream master
+
+          if [ ! -f Dockerfile ] && [ ! -f Dockerfile.aarch64 ]; then
+            echo "::error::No Dockerfile after merge; refusing to push."
+            exit 1
+          fi
+
+          git push origin HEAD:master
+          echo "Pushed merge to origin/master"
+
+      - name: Record synced version in repo variable
+        if: steps.ver.outputs.version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh variable set FAH_VERSION --body "${{ steps.ver.outputs.version }}" \
+            --repository "${{ github.repository }}"
+          echo "Set FAH_VERSION=${{ steps.ver.outputs.version }}"
