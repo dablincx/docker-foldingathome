@@ -1,6 +1,12 @@
 #!/usr/bin/with-contenv bash
 # Wrapper that lets this image run with `docker --init` (tini as PID 1).
 # s6-overlay-suexec refuses to start unless it is PID 1 in its PID namespace,
-# so we re-exec /init inside a fresh PID namespace via `unshare -fp`. Inside
-# the new namespace s6 sees itself as PID 1; outside, tini remains PID 1.
-exec /usr/bin/unshare -fp -- /init "$@"
+# so we re-exec /init inside fresh PID + mount namespaces via `unshare -fpm`.
+# -p : s6-suexec needs to be PID 1.
+# -m : the baseimage's init scripts mount a tmpfs at /run/s6 and populate
+#      /run/s6/container_environment before s6 starts; without an isolated
+#      mount namespace those mounts vanish (or fight tini) and s6-envdir
+#      later reports: "fatal: unable to envdir /run/s6/container_environment".
+# Inside the new namespace s6 sees itself as PID 1; outside, tini stays
+# PID 1 so `docker --init` still gets clean signal/ zombie reaping.
+exec /usr/bin/unshare -fpm -- /init "$@"
