@@ -10,8 +10,7 @@ LABEL build_version="Linuxserver.io version:- ${VERSION} Build-date:- ${BUILD_DA
 LABEL maintainer="aptalca"
 
 # Add needed nvidia environment variables for container toolkit
-ENV NVIDIA_DRIVER_CAPABILITIES="compute,video,utility" \
-    S6_KEEP_ENV=1
+ENV NVIDIA_DRIVER_CAPABILITIES="compute,video,utility"
 
 # global environment settings
 ENV DEBIAN_FRONTEND="noninteractive"
@@ -22,8 +21,7 @@ RUN \
   apt-get install -y \
     bzip2 \
     intel-opencl-icd \
-    libexpat1 \
-    util-linux && \
+    libexpat1 && \
   ln -s libOpenCL.so.1 /usr/lib/x86_64-linux-gnu/libOpenCL.so && \
   echo "**** install foldingathome ****" && \
   if [ -z ${FOLDINGATHOME_RELEASE+x} ]; then \
@@ -45,8 +43,6 @@ RUN \
 
 # add local files
 COPY root/ /
-
-# Run our init wrapper so the container works even with `docker --init`
 RUN chmod +x /usr/local/bin/init-wrapper
 ENTRYPOINT ["/usr/local/bin/init-wrapper"]
 CMD []

@@ -1,33 +1,71 @@
-#!/usr/bin/with-contenv bash
-# Wrapper that lets this image run with `docker --init` (tini as PID 1).
+#!/usr/bin/env bash
+# Entrypoint for foldingathome. Replaces the previous s6-overlay tree with a
+# straightforward shell script that does what s6 used to:
 #
-# The baseimage is designed around s6-overlay v3, which reads container
-# env vars from /run/s6/container_environment (an envdir). Stock Docker
-# populates that dir for you; some hosts (notably RunPod under --init)
-# don't, which is why you see:
+#   1. Fix /config ownership (was: init-foldingathome-config)
+#   2. Grant /dev/dri access to the abc user (was: init-foldingathome-video)
+#   3. Run fah-client in the foreground as user abc
+#      (was: svc-foldingathome)
 #
-#   s6-envdir: fatal: unable to envdir /run/s6/container_environment:
-#              No such file or directory
-#
-# Two changes make this resilient on any host, regardless of how /run is
-# pre-populated:
-#
-#   1. unshare -fpm gives /init its own PID + mount namespaces.
-#        -p  s6-overlay-suexec insists on PID 1 in its PID NS.
-#        -m  s6-overlay then mounts its own tmpfs at /run and creates
-#            /run/s6/container_environment itself, no race with the host.
-#
-#   2. S6_KEEP_ENV=1 instructs s6-overlay to inherit the existing env
-#      directly instead of routing through with-contenv and s6-envdir.
-#      Even if /run/s6/container_environment never gets populated for
-#      any reason, every service still sees the original Docker env.
+# No s6, no unshare, no pid-1 gymnastics needed.
 
 set -eu
 
-# S6_KEEP_ENV=1 makes with-contenv a no-op so services don't need the
-# /run/s6/container_environment envdir to be present. Export it before
-# unshare so the env value propagates into the new namespace via the
-# inherited environment.
-export S6_KEEP_ENV="${S6_KEEP_ENV:-1}"
+# 1. Permissions on config root and folders.
+if [ -d /config ]; then
+    chown -R abc:abc /config || true
+fi
 
-exec /usr/bin/unshare -fpm -- /init "$@"
+# 2. /dev/dri (hardware video encode) permissions. Mirrors the previous
+# init-foldingathome-video logic exactly.
+FILES=$(find /dev/dri /dev/dvb -type c -print 2>/dev/null || true)
+for dev in $FILES; do
+    VIDEO_GID=$(stat -c '%g' "${dev}")
+    VIDEO_UID=$(stat -c '%u' "${dev}")
+    if id -u abc | grep -qw "${VIDEO_UID}"; then
+        :
+    elif id -G abc | grep -qw "${VIDEO_GID}" \
+         && [ "$(stat -c '%A' "${dev}" | cut -b 5,6)" = "rw" ]; then
+        :
+    else
+        VIDEO_NAME=$(getent group "${VIDEO_GID}" | awk -F: '{print $1}')
+        if [ -z "${VIDEO_NAME}" ]; then
+            VIDEO_NAME="video$(head /dev/urandom | tr -dc 'a-z0-9' | head -c4)"
+            groupadd "${VIDEO_NAME}"
+            groupmod -g "${VIDEO_GID}" "${VIDEO_NAME}"
+            echo "creating video group ${VIDEO_NAME} with id ${VIDEO_GID}"
+        fi
+        usermod -a -G "${VIDEO_NAME}" abc
+        if [ "$(stat -c '%A' "${dev}" | cut -b 5,6)" != "rw" ]; then
+            chmod g+rw "${dev}" || true
+        fi
+    fi
+done
+
+# 3. Final env-var nudging; warn if ACCOUNT_TOKEN / MACHINE_NAME missing.
+if [[ -n "${ACCOUNT_TOKEN}" ]] && [[ -n "${MACHINE_NAME}" ]]; then
+    TOKEN_AND_NAME="--account-token ${ACCOUNT_TOKEN} --machine-name ${MACHINE_NAME}"
+else
+    cat <<'EOF' >&2
+
+***************************************************************************
+****                                                                   ****
+****  On first run, both ACCOUNT_TOKEN and MACHINE_NAME env vars are   ****
+****  required unless the instance was previously added to online      ****
+****  account.                                                         ****
+****                                                                   ****
+***************************************************************************
+
+EOF
+    TOKEN_AND_NAME=""
+fi
+
+# 4. Exec fah-client as user abc. cd to /config so any relative paths the
+#    user passes in CLI_ARGS resolve correctly.
+cd /config
+exec setpriv --reuid=abc --regid=abc --clear-groups \
+    /app/fah-client \
+        --http-addresses 0.0.0.0:7396 \
+        --allow 0/0 \
+        ${TOKEN_AND_NAME} \
+        ${CLI_ARGS:-}
