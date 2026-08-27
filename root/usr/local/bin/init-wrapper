@@ -1,0 +1,6 @@
+#!/usr/bin/with-contenv bash
+# Wrapper that lets this image run with `docker --init` (tini as PID 1).
+# s6-overlay-suexec refuses to start unless it is PID 1 in its PID namespace,
+# so we re-exec /init inside a fresh PID namespace via `unshare -fp`. Inside
+# the new namespace s6 sees itself as PID 1; outside, tini remains PID 1.
+exec /usr/bin/unshare -fp -- /init "$@"

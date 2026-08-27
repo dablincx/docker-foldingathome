@@ -21,7 +21,8 @@ RUN \
   apt-get install -y \
     bzip2 \
     intel-opencl-icd \
-    libexpat1 && \
+    libexpat1 \
+    util-linux && \
   ln -s libOpenCL.so.1 /usr/lib/x86_64-linux-gnu/libOpenCL.so && \
   echo "**** install foldingathome ****" && \
   if [ -z ${FOLDINGATHOME_RELEASE+x} ]; then \
@@ -44,7 +45,12 @@ RUN \
 # add local files
 COPY root/ /
 
-# ports and volumes
+# Run our init wrapper so the container works even with `docker --init`
+RUN chmod +x /usr/local/bin/init-wrapper
+ENTRYPOINT ["/usr/local/bin/init-wrapper"]
+CMD []
+
+# ports and volumes
 EXPOSE 7396
 
 VOLUME /config
