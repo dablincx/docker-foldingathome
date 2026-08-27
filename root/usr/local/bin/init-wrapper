@@ -11,25 +11,30 @@
 # Inside the new namespace s6 sees itself as PID 1; outside, tini stays
 # PID 1 so `docker --init` still reaps zombies and forwards signals.
 
+set -eu
+
 # Belt-and-braces: ensure the envdir exists before s6-overlay's init opens
 # it. With `unshare -m`, the parent mount NS may carry an empty (or
 # nonexistent) /run/s6; creating the directory here lets s6-envdir open
 # it successfully even on hosts that don't pre-mount anything under /run.
 mkdir -p /run/s6/container_environment
 
-# Seed the envdir with every env var passed by Docker, minus a couple of
-# internal ones that s6-overlay already handles on its own. This mirrors
-# what `init-mods-package-install`-style boot scripts do on a stock
-# LinuxServer baseimage — and makes the wrapper robust to hosts (RunPod,
-# generic Docker, etc.) that don't pre-populate /run/s6.
-for var in $(env | cut -d= -f1); do
-    case "$var" in
-        HOSTNAME|HOME|PATH|TERM|SHLVL|PWD|_|LSIO_FIRST_PART1)
-            continue
-            ;;
-    esac
-    value=$(printf '%s' "${!var}")
-    printf '%s' "$value" > "/run/s6/container_environment/$var" 2>/dev/null || true
-done
+# Seed the envdir from /proc/1/environ (NUL-separated, the original Docker
+# env), not from `env` -- `with-contenv` already strips Docker vars from
+# the shell's view on hosts like RunPod, so `env` here would yield nothing.
+# Each file's content is the bare value (no trailing newline), matching
+# s6-envdir's expected layout.
+if [ -r /proc/1/environ ]; then
+    while IFS= read -r -d '' entry; do
+        key="${entry%%=*}"
+        val="${entry#*=}"
+        case "$key" in
+            HOSTNAME|HOME|PATH|TERM|SHLVL|PWD|_|LSIO_FIRST_PART1)
+                continue
+                ;;
+        esac
+        printf '%s' "$val" > "/run/s6/container_environment/$key"
+    done < /proc/1/environ
+fi
 
 exec /usr/bin/unshare -fpm -- /init "$@"
