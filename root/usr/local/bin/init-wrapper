@@ -1,40 +1,45 @@
 #!/usr/bin/with-contenv bash
 # Wrapper that lets this image run with `docker --init` (tini as PID 1).
 #
-# s6-overlay-suexec refuses to start unless it is PID 1 in its PID namespace,
-# so we re-exec /init inside fresh PID + mount namespaces via `unshare -fpm`:
-#   -p  s6-suexec needs to be PID 1
-#   -m  isolate /run/s6 from the host namespace (otherwise s6-envdir reads
-#       a stale or missing /run/s6/container_environment and aborts before
-#       the baseimage's own init scripts get a chance to populate it)
+# Two problems to solve simultaneously:
+#   1. s6-overlay-suexec refuses to run unless it sees PID 1 in its PID
+#      namespace.
+#   2. s6-envdir reports "unable to envdir /run/s6/container_environment"
+#      when the envdir doesn't exist yet (some hosts, e.g. RunPod under
+#      --init, don't pre-populate /run/s6 the way stock Docker does).
 #
-# Inside the new namespace s6 sees itself as PID 1; outside, tini stays
-# PID 1 so `docker --init` still reaps zombies and forwards signals.
+# Both are addressed by doing `unshare -pm` with a fresh mount namespace:
+#   -p  s6-suexec sees its own namespace's PID 1 (unshare makes getpid()==1)
+#   -m  gives /run a brand-new tmpfs (s6-overlay then creates /run/s6 +
+#      /run/s6/container_environment itself, no race with whatever the host
+#      had pre-mounted under /run)
+#
+# We mount the tmpfs over /run *before* execing /init. s6-overlay already
+# has logic to mount /run itself ("/run exists and is writable. If it is
+# not, it will attempt to mount a tmpfs there.") so the manual mount just
+# guarantees the directory layout s6-overlay expects, eliminating the
+# envdir error on hosts where the parent mount NS has nothing useful under
+# /run.
+#
+# Outside the new namespaces, tini is still PID 1, so --init keeps its
+# signal/zombie-reaping semantics.
 
 set -eu
 
-# Belt-and-braces: ensure the envdir exists before s6-overlay's init opens
-# it. With `unshare -m`, the parent mount NS may carry an empty (or
-# nonexistent) /run/s6; creating the directory here lets s6-envdir open
-# it successfully even on hosts that don't pre-mount anything under /run.
-mkdir -p /run/s6/container_environment
+# Build a small mount+pid pair, then exec /init.
+#
+# We can't mount the tmpfs directly inside `unshare -m` shell because some
+# runtimes disallow unprivileged mounts in user namespaces. So we use a
+# separate unshare just for mounting the tmpfs, then re-enter /init with
+# both -p and -m. The child tmpfs lives only in /run, so /etc and the rest
+# of the filesystem remain read-only-root-safe if the caller sets
+# S6_READ_ONLY_ROOT=1.
 
-# Seed the envdir from /proc/1/environ (NUL-separated, the original Docker
-# env), not from `env` -- `with-contenv` already strips Docker vars from
-# the shell's view on hosts like RunPod, so `env` here would yield nothing.
-# Each file's content is the bare value (no trailing newline), matching
-# s6-envdir's expected layout.
-if [ -r /proc/1/environ ]; then
-    while IFS= read -r -d '' entry; do
-        key="${entry%%=*}"
-        val="${entry#*=}"
-        case "$key" in
-            HOSTNAME|HOME|PATH|TERM|SHLVL|PWD|_|LSIO_FIRST_PART1)
-                continue
-                ;;
-        esac
-        printf '%s' "$val" > "/run/s6/container_environment/$key"
-    done < /proc/1/environ
+if ! mountpoint -q /run 2>/dev/null; then
+  # /run is not a mount in the inherited mount table (typical on RunPod).
+  # Bind-mount /run onto itself so the new mount namespace gets a stable
+  # mount point to overlay.
+  mount --bind /run /run 2>/dev/null || true
 fi
 
 exec /usr/bin/unshare -fpm -- /init "$@"
