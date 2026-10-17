@@ -55,7 +55,8 @@ jobs:
         if: steps.diff.outputs.no_new_commits != 'true'
         run: |
           set -e
-          git pull --no-edit --strategy-option=theirs upstream master
+          # The fork and upstream have independent histories; explicitly create the initial merge.
+          git pull --allow-unrelated-histories --no-rebase --no-edit --strategy-option=theirs upstream master
 
           if [ ! -f Dockerfile ] && [ ! -f Dockerfile.aarch64 ]; then
             echo "::error::No Dockerfile after merge; refusing to push."
