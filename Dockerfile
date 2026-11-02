@@ -43,11 +43,8 @@ RUN \
 
 # add local files
 COPY root/ /
-RUN chmod +x /usr/local/bin/init-wrapper
-ENTRYPOINT ["/usr/local/bin/init-wrapper"]
-CMD []
 
-# ports and volumes
+# ports and volumes
 EXPOSE 7396
 
 VOLUME /config
