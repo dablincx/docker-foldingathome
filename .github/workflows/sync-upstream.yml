@@ -56,21 +56,43 @@ jobs:
         run: |
           set -e
           # The fork and upstream have independent histories; explicitly create the initial merge.
-          git pull --allow-unrelated-histories --no-rebase --no-edit --strategy-option=theirs upstream master
+          # Merge without committing so we can drop upstream's workflow changes first.
+          git merge --allow-unrelated-histories --no-commit --no-ff \
+            --strategy-option=theirs upstream/master || true
+
+          # GITHUB_TOKEN may not create/update files under .github/workflows, and
+          # upstream's linuxserver CI workflows don't apply to this fork anyway.
+          # Always keep our own workflows exactly as they are on master.
+          git rm -r -q --cached --ignore-unmatch .github/workflows
+          rm -rf .github/workflows
+          git checkout HEAD -- .github/workflows
+
+          if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+            echo "::error::Unresolved merge conflicts:"
+            git diff --name-only --diff-filter=U
+            exit 1
+          fi
 
           if [ ! -f Dockerfile ] && [ ! -f Dockerfile.aarch64 ]; then
             echo "::error::No Dockerfile after merge; refusing to push."
             exit 1
           fi
 
+          git commit --no-edit
           git push origin HEAD:master
           echo "Pushed merge to origin/master"
 
       - name: Record synced version in repo variable
         if: steps.ver.outputs.version
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITHUB_TOKEN can't write repo variables; needs a PAT with
+          # "Variables: read & write" stored as the SYNC_PAT secret.
+          GH_TOKEN: ${{ secrets.SYNC_PAT }}
         run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::SYNC_PAT secret not set; skipping FAH_VERSION update (would be ${{ steps.ver.outputs.version }})."
+            exit 0
+          fi
           gh variable set FAH_VERSION --body "${{ steps.ver.outputs.version }}" \
-            --repository "${{ github.repository }}"
+            --repo "${{ github.repository }}"
           echo "Set FAH_VERSION=${{ steps.ver.outputs.version }}"
